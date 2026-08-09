@@ -1,9 +1,10 @@
-name: Daily Solace Anchor
+name: Near-real-time Solace Anchor
 
 on:
   schedule:
-    # 12:34 UTC daily. Off the hour to avoid GitHub schedule herds.
-    - cron: '34 12 * * *'
+    # Every 5 minutes. GitHub schedule resolution is ~1 minute; this keeps the
+    # public anchor within moments of a new sealed decision.
+    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 permissions:
@@ -21,7 +22,7 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Generate today's anchor
+      - name: Generate latest anchor
         env:
           SOLACE_API_URL: https://solace.fyi
         run: node scripts/generate-anchor.mjs
@@ -34,6 +35,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "No anchor changes to commit."
           else
-            git commit -m "Anchor chain head for $(date -u +%Y-%m-%d)"
+            git commit -m "Anchor chain head at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
             git push
           fi

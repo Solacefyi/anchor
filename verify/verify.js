@@ -18,7 +18,11 @@ async function fetchJson(url) {
 }
 
 function verifyContinuity(anchors) {
-  const sorted = [...anchors].sort((a, b) => a.date.localeCompare(b.date));
+  const sorted = [...anchors].sort((a, b) => {
+    const byDate = a.date.localeCompare(b.date);
+    if (byDate !== 0) return byDate;
+    return String(a.sealedAt ?? '').localeCompare(String(b.sealedAt ?? ''));
+  });
   const breaks = [];
   for (let i = 0; i < sorted.length; i++) {
     const anchor = sorted[i];

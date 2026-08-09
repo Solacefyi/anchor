@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 /**
- * Generate today's Solace Anchor file from the live Hermes decision ledger.
+ * Generate the latest Solace Anchor file from the live Hermes decision ledger.
  *
  * Usage:
  *   node scripts/generate-anchor.mjs
  *   SOLACE_API_URL=https://solace.fyi node scripts/generate-anchor.mjs
  *
- * The script reads existing YYYY-MM-DD.json files in the anchor directory,
- * fetches the current chain head, writes today's anchor, and verifies
- * continuity.
+ * The script reads existing anchor files in the anchor directory, fetches the
+ * current chain head, writes a new timestamped anchor if the chain has moved,
+ * and verifies continuity.
  */
 
 import { createHash } from 'crypto';
@@ -20,6 +20,10 @@ const SOLACE_API_URL = (process.env.SOLACE_API_URL || 'https://solace.fyi').repl
 
 const __filename = fileURLToPath(import.meta.url);
 const ANCHOR_DIR = path.resolve(path.dirname(__filename), '..');
+
+// Matches both legacy daily files (YYYY-MM-DD.json) and new timestamped files
+// (YYYY-MM-DDTHH-MM-SS.json). Colons are replaced with dashes for filesystem safety.
+const ANCHOR_FILE_RE = /^\d{4}-\d{2}-\d{2}(T\d{2}-\d{2}-\d{2})?\.json$/;
 
 function sha256Hex(value) {
   return createHash('sha256').update(value, 'utf8').digest('hex');
@@ -51,7 +55,7 @@ async function fetchLedger() {
 
 async function listAnchorFiles() {
   const entries = await fs.readdir(ANCHOR_DIR);
-  const files = entries.filter((f) => /^\d{4}-\d{2}-\d{2}\.json$/.test(f));
+  const files = entries.filter((f) => ANCHOR_FILE_RE.test(f));
   return Promise.all(
     files.map(async (file) => {
       const raw = await fs.readFile(path.join(ANCHOR_DIR, file), 'utf8');
@@ -60,8 +64,16 @@ async function listAnchorFiles() {
   );
 }
 
+function sortAnchors(anchors) {
+  return [...anchors].sort((a, b) => {
+    const byDate = a.date.localeCompare(b.date);
+    if (byDate !== 0) return byDate;
+    return String(a.sealed_at ?? '').localeCompare(String(b.sealed_at ?? ''));
+  });
+}
+
 function verifyContinuity(anchors) {
-  const sorted = [...anchors].sort((a, b) => a.date.localeCompare(b.date));
+  const sorted = sortAnchors(anchors);
   for (let i = 0; i < sorted.length; i++) {
     const anchor = sorted[i];
     if (i === 0) {
@@ -79,18 +91,21 @@ function verifyContinuity(anchors) {
   }
 }
 
-function todayUtc() {
-  const now = new Date();
-  return now.toISOString().slice(0, 10);
+function nowUtcIso() {
+  return new Date().toISOString();
+}
+
+function filenameFromIso(iso) {
+  // 2026-08-09T12:34:56.000Z -> 2026-08-09T12-34-56.json
+  const [date, time] = iso.split('T');
+  const [hh, mm, ss] = time.split(':');
+  return `${date}T${hh}-${mm}-${ss.split('.')[0]}.json`;
 }
 
 async function main() {
-  const today = todayUtc();
-  const outputPath = path.join(ANCHOR_DIR, `${today}.json`);
-
   const existingAnchors = await listAnchorFiles();
-  const sortedExisting = existingAnchors.sort((a, b) => a.date.localeCompare(b.date));
-  const previous = sortedExisting.filter((a) => a.date < today).pop() ?? null;
+  const sortedExisting = sortAnchors(existingAnchors);
+  const previous = sortedExisting[sortedExisting.length - 1] ?? null;
 
   const ledger = await fetchLedger();
   const chainHead = ledger?.chain?.head;
@@ -100,32 +115,25 @@ async function main() {
     throw new Error('Ledger returned no chain head. Cannot anchor an empty chain.');
   }
 
-  const expectedPrevious = previous ? previous.chain_head : null;
-  const existingToday = sortedExisting.find((a) => a.date === today);
-  if (existingToday) {
-    const sameHead = existingToday.chain_head === chainHead;
-    const sameRow = existingToday.row_number === rowNumber;
-    const samePrevious = existingToday.previous_anchor === expectedPrevious;
-    if (sameHead && sameRow && samePrevious) {
-      console.log(`Anchor for ${today} already up to date.`);
-      return;
-    }
-    console.log(`Updating existing anchor for ${today}.`);
+  // Idempotent: if the latest anchor already captures this chain head, do nothing.
+  if (previous && previous.chain_head === chainHead && previous.row_number === rowNumber) {
+    console.log(`Chain head already anchored at ${previous.sealed_at}.`);
+    return;
   }
 
+  const sealedAt = nowUtcIso();
+  const outputPath = path.join(ANCHOR_DIR, filenameFromIso(sealedAt));
+
   const anchor = {
-    date: today,
+    date: sealedAt,
     chain_head: chainHead,
     row_number: rowNumber,
-    sealed_at: new Date().toISOString(),
+    sealed_at: sealedAt,
     previous_anchor: previous ? previous.chain_head : null,
-    source_url: `https://solace.fyi/anchor/${today}`,
+    source_url: `https://solace.fyi/anchor/${path.basename(outputPath, '.json')}`,
   };
 
-  // Verify the new anchor maintains continuity before writing,
-  // replacing any existing anchor for today.
-  const priorAnchors = sortedExisting.filter((a) => a.date < today);
-  verifyContinuity([...priorAnchors, anchor]);
+  verifyContinuity([...sortedExisting, anchor]);
 
   const payload = canonicalAnchorPayload(anchor);
   const fileHash = anchorFileHash(anchor);

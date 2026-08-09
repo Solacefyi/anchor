@@ -22,7 +22,9 @@ def fetch_json(url: str):
 
 
 def verify_continuity(anchors):
-    sorted_anchors = sorted(anchors, key=lambda a: a["date"])
+    sorted_anchors = sorted(
+        anchors, key=lambda a: (a["date"], a.get("sealedAt") or "")
+    )
     breaks = []
     for i, anchor in enumerate(sorted_anchors):
         if i == 0:
